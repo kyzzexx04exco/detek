@@ -1,4 +1,4 @@
-// utils/probe.js — Direct WA OTP cooldown probe
+// utils/probe.js — WA OTP cooldown probe via /v2/code
 import axios  from 'axios';
 import crypto from 'crypto';
 import 'dotenv/config';
@@ -17,21 +17,17 @@ const TOKEN_PRECALC_KEY = Buffer.from(
 
 const WA_CERT_DER    = process.env.WA_CERT_DER ? Buffer.from(process.env.WA_CERT_DER, 'base64') : null;
 const WA_CLASSES_MD5 = process.env.WA_CLASSES_MD5 ? Buffer.from(process.env.WA_CLASSES_MD5, 'base64') : null;
-const TOKEN_READY    = !!(WA_CERT_DER && WA_CLASSES_MD5);
+
+// Baca User-Agent yang otomatis disinkronkan oleh setup-apk.js
+const FIXED_UA = process.env.WA_UA || 'WhatsApp/2.24.13.76 A';
+
+const TOKEN_READY = !!(WA_CERT_DER && WA_CLASSES_MD5);
 
 const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
 
-const UA_POOL = [
-  'WhatsApp/2.24.13.76 A',
-  'WhatsApp/2.24.11.75 A',
-  'WhatsApp/2.24.9.73 A'
-];
-const rndUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
-const rndId = () => crypto.randomBytes(8).toString('hex');
-
-function baseHeaders(ua) {
+function baseHeaders() {
   return {
-    'User-Agent':      ua,
+    'User-Agent':      FIXED_UA,
     'Accept':          'application/json, text/plain, */*',
     'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8',
   };
@@ -64,9 +60,15 @@ function encryptParams(queryString) {
   const ct      = Buffer.concat([cipher.update(Buffer.from(queryString, 'utf8')), cipher.final()]);
   const authTag = cipher.getAuthTag();
   const clientPubRaw = clientPub.export({ format: 'der', type: 'spki' }).subarray(12);
-  return Buffer.concat([clientPubRaw, ct, authTag]).toString('base64url');
+  
+  return Buffer.concat([clientPubRaw, ct, authTag])
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
 }
 
+// Fungsi asli murni WA
 function buildToken(phone) {
   const digits = Buffer.from(phone.replace('+', ''), 'utf8');
   const data = Buffer.concat([WA_CERT_DER, WA_CLASSES_MD5, digits]);
@@ -89,7 +91,6 @@ export function fmtCooldown(secs) {
 
 export async function probeNumber(phone) {
   const { cc, inn } = splitPhone(phone);
-  const ua = rndUA();
 
   const state = {
     phone,
@@ -117,16 +118,19 @@ export async function probeNumber(phone) {
     return state;
   }
 
+  const rndId = () => crypto.randomBytes(8).toString('hex');
+
   // ─── STAGE 1: CEK EXIST ────────────────────────────────────────────────────
   const existParams = new URLSearchParams({
-    cc, in: inn, lg: 'id', lc: 'ID', id: rndId()
+    cc, in: inn, lg: 'id', lc: 'ID', id: rndId(),
+    platform: 'Android' // FIX: Sinkronkan platform di Stage 1
   });
   const existEnc = encryptParams(existParams.toString());
 
   try {
     const existRes = await axios.get('https://v.whatsapp.net/v2/exist', {
       params: { ENC: existEnc },
-      headers: baseHeaders(ua),
+      headers: baseHeaders(),
       timeout: 10_000,
       validateStatus: () => true,
     });
@@ -164,7 +168,8 @@ export async function probeNumber(phone) {
     id:                  rndId(),
     backup_token:        '',
     entered:             '',
-    authkey:             ''
+    authkey:             '',
+    platform:            'Android'
   });
 
   const codeEnc = encryptParams(codeParams.toString());
@@ -172,7 +177,7 @@ export async function probeNumber(phone) {
   try {
     const codeRes = await axios.get('https://v.whatsapp.net/v2/code', {
       params:         { ENC: codeEnc },
-      headers:        baseHeaders(ua),
+      headers:        baseHeaders(),
       timeout:        12_000,
       validateStatus: () => true,
     });
@@ -186,14 +191,11 @@ export async function probeNumber(phone) {
     const s = String(body.status || '').toLowerCase();
     const reason = String(body.reason || '').toLowerCase();
     
-    // Baca retry_after ATAU resend_after_seconds
-    const retry = parseInt(
-      body.retry_after ?? 
-      body.resend_after_seconds ?? 
-      body.sec_wait ?? 
-      body.retry ?? 
-      '0', 10
-    ) || 0;
+    let retryStr = body.retry_after;
+    if (!retryStr && body.resend_after_seconds) retryStr = body.resend_after_seconds;
+    if (!retryStr && body.sec_wait) retryStr = body.sec_wait;
+    if (!retryStr && body.retry) retryStr = body.retry;
+    const retry = parseInt(retryStr || '0', 10) || 0;
 
     if (s === 'sent' || s === 'ok') {
       state.registered = true;
