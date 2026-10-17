@@ -1,4 +1,4 @@
-// utils/probe.js — WA OTP cooldown probe via /v2/code
+// utils/probe.js — WA OTP cooldown probe via /v2/code (Fix platform)
 import axios  from 'axios';
 import crypto from 'crypto';
 import 'dotenv/config';
@@ -21,6 +21,7 @@ const TOKEN_READY    = !!(WA_CERT_DER && WA_CLASSES_MD5);
 
 const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
 
+// Pastikan User-Agent Android valid
 const UA_POOL = [
   'WhatsApp/2.24.13.76 A',
   'WhatsApp/2.24.11.75 A',
@@ -33,7 +34,7 @@ function baseHeaders(ua) {
   return {
     'User-Agent':      ua,
     'Accept':          'application/json, text/plain, */*',
-    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8',
   };
 }
 
@@ -118,12 +119,12 @@ export async function probeNumber(phone) {
 
   const token = buildToken(phone);
 
-  // FIX: multidevice wajib 'true', platform & os wajib ada, os_version string angka
+  // HAPUS platform, os, os_version. Biarkan User-Agent yang baca platform.
   const innerParams = new URLSearchParams({
     cc,
     in:                  inn,
-    lg:                  'en',
-    lc:                  'US',
+    lg:                  'id',
+    lc:                  'ID',
     mistyped:            '6',
     multidevice:         'true',
     method:              'sms',
@@ -135,10 +136,7 @@ export async function probeNumber(phone) {
     id:                  rndId(),
     backup_token:        '',
     entered:             '',
-    authkey:             '',
-    platform:            'android',
-    os:                  'android',
-    os_version:          '31'
+    authkey:             ''
   });
 
   const enc = encryptParams(innerParams.toString());
