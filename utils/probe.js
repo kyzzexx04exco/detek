@@ -1,4 +1,4 @@
-// utils/probe.js — WA OTP cooldown probe via /v2/code
+// utils/probe.js — Direct WA OTP cooldown probe
 import axios  from 'axios';
 import crypto from 'crypto';
 import 'dotenv/config';
@@ -148,7 +148,6 @@ export async function probeNumber(phone) {
   // ─── STAGE 2: CEK CODE (REQUEST OTP) ───────────────────────────────────────
   const token = buildToken(phone);
   
-  // FIX: Buang parameter 'platform', WA terbaru nolak itu di /v2/code
   const codeParams = new URLSearchParams({
     cc,
     in:                  inn,
@@ -183,29 +182,26 @@ export async function probeNumber(phone) {
 
     if (DEBUG) console.log(`[CODE] ${phone} | HTTP ${codeRes.status} | ${JSON.stringify(codeRes.data)}`);
 
-    const body = res.data || {}; // Typo fix: res -> codeRes
-    const bodySafe = codeRes.data || {};
+    const body = codeRes.data || {};
+    const s = String(body.status || '').toLowerCase();
+    const reason = String(body.reason || '').toLowerCase();
     
-    const s = String(bodySafe.status || '').toLowerCase();
-    const reason = String(bodySafe.reason || '').toLowerCase();
-    
-    // FIX: Tarik retry_after ATAU resend_after_seconds persis kayak yg lo bilang
+    // Baca retry_after ATAU resend_after_seconds
     const retry = parseInt(
-      bodySafe.retry_after ?? 
-      bodySafe.resend_after_seconds ?? 
-      bodySafe.sec_wait ?? 
-      bodySafe.retry ?? 
+      body.retry_after ?? 
+      body.resend_after_seconds ?? 
+      body.sec_wait ?? 
+      body.retry ?? 
       '0', 10
     ) || 0;
 
     if (s === 'sent' || s === 'ok') {
       state.registered = true;
       state.canReceiveOTP = true;
-      state.cloneSupport = bodySafe.voice_length !== undefined || bodySafe.flash_type !== undefined;
+      state.cloneSupport = body.voice_length !== undefined || body.flash_type !== undefined;
       return state;
     }
     
-    // Cooldown Akun Asli (Bisa 2 jam)
     if (s === 'too_recent' || s === 'too-recent' || reason === 'too_recent') {
       state.registered = true; 
       state.cooldown = true;
@@ -214,7 +210,6 @@ export async function probeNumber(phone) {
       return state;
     }
 
-    // Limit IP Server (Biasanya 5 menit)
     if (reason === 'temporarily_unavailable') {
       state.registered = true;
       state.ipLimited = true;
@@ -241,7 +236,7 @@ export async function probeNumber(phone) {
     if (reason === 'bad_param' || reason === 'bad_token' || codeRes.status === 401 || codeRes.status === 403) {
       state.tokenRejected = true;
       state.canReceiveOTP = false;
-      state.errorDetail = `Param/Token Invalid: ${bodySafe.param || 'unknown'}`;
+      state.errorDetail = `Param/Token Invalid: ${body.param || 'unknown'}`;
       return state;
     }
 
