@@ -1,4 +1,4 @@
-// utils/probe.js — WA OTP cooldown probe (Fix registration false-negative)
+// utils/probe.js — WA OTP cooldown probe via /v2/code
 import axios  from 'axios';
 import crypto from 'crypto';
 import 'dotenv/config';
@@ -98,6 +98,7 @@ export async function probeNumber(phone) {
     bannedType:     null,
     cooldown:       false,
     cooldownSecs:   null,
+    ipLimited:      false,
     cloneSupport:   false,
     noCloneSupport: false,
     limitActive:    false,
@@ -116,7 +117,7 @@ export async function probeNumber(phone) {
     return state;
   }
 
-  // ─── STAGE 1: CEK EXIST (Registrasi) ───────────────────────────────────────
+  // ─── STAGE 1: CEK EXIST ────────────────────────────────────────────────────
   const existParams = new URLSearchParams({
     cc, in: inn, lg: 'id', lc: 'ID', id: rndId()
   });
@@ -134,7 +135,6 @@ export async function probeNumber(phone) {
     if (existBody.status === 'ok' && existBody.login) {
       state.registered = true;
     } else if (existBody.status === 'fail' && !existBody.login) {
-      // Cek reason. Kalau bad_token, jangan langsung anggap unregistered.
       if (existBody.reason !== 'bad_token' && existBody.reason !== 'bad_param') {
         state.registered = false;
         state.canReceiveOTP = false;
@@ -145,8 +145,10 @@ export async function probeNumber(phone) {
     if (DEBUG) console.log(`[EXIST ERR] ${phone} | ${e.message}`);
   }
 
-  // ─── STAGE 2: CEK CODE (Cooldown) ──────────────────────────────────────────
+  // ─── STAGE 2: CEK CODE (REQUEST OTP) ───────────────────────────────────────
   const token = buildToken(phone);
+  
+  // FIX: Buang parameter 'platform', WA terbaru nolak itu di /v2/code
   const codeParams = new URLSearchParams({
     cc,
     in:                  inn,
@@ -181,23 +183,42 @@ export async function probeNumber(phone) {
 
     if (DEBUG) console.log(`[CODE] ${phone} | HTTP ${codeRes.status} | ${JSON.stringify(codeRes.data)}`);
 
-    const body = codeRes.data || {};
-    const s = String(body.status || '').toLowerCase();
-    const reason = String(body.reason || '').toLowerCase();
-    const retry = parseInt(body.retry_after ?? body.sec_wait ?? body.retry ?? '0', 10) || 0;
+    const body = res.data || {}; // Typo fix: res -> codeRes
+    const bodySafe = codeRes.data || {};
+    
+    const s = String(bodySafe.status || '').toLowerCase();
+    const reason = String(bodySafe.reason || '').toLowerCase();
+    
+    // FIX: Tarik retry_after ATAU resend_after_seconds persis kayak yg lo bilang
+    const retry = parseInt(
+      bodySafe.retry_after ?? 
+      bodySafe.resend_after_seconds ?? 
+      bodySafe.sec_wait ?? 
+      bodySafe.retry ?? 
+      '0', 10
+    ) || 0;
 
     if (s === 'sent' || s === 'ok') {
       state.registered = true;
       state.canReceiveOTP = true;
-      state.cloneSupport = body.voice_length !== undefined || body.flash_type !== undefined;
+      state.cloneSupport = bodySafe.voice_length !== undefined || bodySafe.flash_type !== undefined;
       return state;
     }
     
-    // WA ngasih cooldown (Retry After)
-    if (s === 'too_recent' || s === 'too-recent' || reason === 'too_recent' || reason === 'temporarily_unavailable') {
+    // Cooldown Akun Asli (Bisa 2 jam)
+    if (s === 'too_recent' || s === 'too-recent' || reason === 'too_recent') {
       state.registered = true; 
       state.cooldown = true;
       state.cooldownSecs = retry > 0 ? retry : null;
+      state.canReceiveOTP = false;
+      return state;
+    }
+
+    // Limit IP Server (Biasanya 5 menit)
+    if (reason === 'temporarily_unavailable') {
+      state.registered = true;
+      state.ipLimited = true;
+      state.cooldownSecs = retry > 0 ? retry : 300;
       state.canReceiveOTP = false;
       return state;
     }
@@ -210,15 +231,6 @@ export async function probeNumber(phone) {
       return state;
     }
 
-    // Limit lain (spam, new acct)
-    if (reason === 'too_many_requests' || s === 'rate_limit' || reason === 'new_acct' || reason === 'new_account' || reason === 'spam') {
-      state.registered = true;
-      state.limitActive = true;
-      state.limitType = reason || 'rate';
-      state.canReceiveOTP = false;
-      return state;
-    }
-
     if (reason === 'no_routes' || reason === 'mismatch' || reason === 'no_multidevice') {
       state.registered = true;
       state.noCloneSupport = true;
@@ -226,19 +238,10 @@ export async function probeNumber(phone) {
       return state;
     }
 
-    // Error param dari server, JANGAN set registered = false!
-    // Biarkan state.registered dari STAGE 1 tetap utuh.
-    if (reason === 'bad_param') {
+    if (reason === 'bad_param' || reason === 'bad_token' || codeRes.status === 401 || codeRes.status === 403) {
       state.tokenRejected = true;
       state.canReceiveOTP = false;
-      state.errorDetail = `Param invalid: ${body.param || 'unknown'}`;
-      return state;
-    }
-
-    if (reason === 'bad_token' || codeRes.status === 401 || codeRes.status === 403) {
-      state.tokenRejected = true;
-      state.canReceiveOTP = false;
-      state.errorDetail = 'Token ditolak WA';
+      state.errorDetail = `Param/Token Invalid: ${bodySafe.param || 'unknown'}`;
       return state;
     }
 
