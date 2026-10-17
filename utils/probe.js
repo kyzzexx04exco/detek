@@ -1,4 +1,4 @@
-// utils/probe.js — WA OTP cooldown probe via /v2/code (Fix platform)
+// utils/probe.js — WA OTP cooldown probe (Fix registration false-negative)
 import axios  from 'axios';
 import crypto from 'crypto';
 import 'dotenv/config';
@@ -21,7 +21,6 @@ const TOKEN_READY    = !!(WA_CERT_DER && WA_CLASSES_MD5);
 
 const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
 
-// Pastikan User-Agent Android valid
 const UA_POOL = [
   'WhatsApp/2.24.13.76 A',
   'WhatsApp/2.24.11.75 A',
@@ -117,10 +116,38 @@ export async function probeNumber(phone) {
     return state;
   }
 
-  const token = buildToken(phone);
+  // ─── STAGE 1: CEK EXIST (Registrasi) ───────────────────────────────────────
+  const existParams = new URLSearchParams({
+    cc, in: inn, lg: 'id', lc: 'ID', id: rndId()
+  });
+  const existEnc = encryptParams(existParams.toString());
 
-  // HAPUS platform, os, os_version. Biarkan User-Agent yang baca platform.
-  const innerParams = new URLSearchParams({
+  try {
+    const existRes = await axios.get('https://v.whatsapp.net/v2/exist', {
+      params: { ENC: existEnc },
+      headers: baseHeaders(ua),
+      timeout: 10_000,
+      validateStatus: () => true,
+    });
+
+    const existBody = existRes.data || {};
+    if (existBody.status === 'ok' && existBody.login) {
+      state.registered = true;
+    } else if (existBody.status === 'fail' && !existBody.login) {
+      // Cek reason. Kalau bad_token, jangan langsung anggap unregistered.
+      if (existBody.reason !== 'bad_token' && existBody.reason !== 'bad_param') {
+        state.registered = false;
+        state.canReceiveOTP = false;
+        return state;
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.log(`[EXIST ERR] ${phone} | ${e.message}`);
+  }
+
+  // ─── STAGE 2: CEK CODE (Cooldown) ──────────────────────────────────────────
+  const token = buildToken(phone);
+  const codeParams = new URLSearchParams({
     cc,
     in:                  inn,
     lg:                  'id',
@@ -139,22 +166,22 @@ export async function probeNumber(phone) {
     authkey:             ''
   });
 
-  const enc = encryptParams(innerParams.toString());
+  const codeEnc = encryptParams(codeParams.toString());
 
   try {
-    const res = await axios.get('https://v.whatsapp.net/v2/code', {
-      params:         { ENC: enc },
+    const codeRes = await axios.get('https://v.whatsapp.net/v2/code', {
+      params:         { ENC: codeEnc },
       headers:        baseHeaders(ua),
       timeout:        12_000,
       validateStatus: () => true,
     });
 
-    state.httpStatus = res.status;
-    state.raw        = res.data;
+    state.httpStatus = codeRes.status;
+    state.raw        = codeRes.data;
 
-    if (DEBUG) console.log(`[CODE] ${phone} | HTTP ${res.status} | ${JSON.stringify(res.data)}`);
+    if (DEBUG) console.log(`[CODE] ${phone} | HTTP ${codeRes.status} | ${JSON.stringify(codeRes.data)}`);
 
-    const body = res.data || {};
+    const body = codeRes.data || {};
     const s = String(body.status || '').toLowerCase();
     const reason = String(body.reason || '').toLowerCase();
     const retry = parseInt(body.retry_after ?? body.sec_wait ?? body.retry ?? '0', 10) || 0;
@@ -165,13 +192,16 @@ export async function probeNumber(phone) {
       state.cloneSupport = body.voice_length !== undefined || body.flash_type !== undefined;
       return state;
     }
-    if (s === 'too_recent' || s === 'too-recent' || reason === 'too_recent') {
-      state.registered = true;
+    
+    // WA ngasih cooldown (Retry After)
+    if (s === 'too_recent' || s === 'too-recent' || reason === 'too_recent' || reason === 'temporarily_unavailable') {
+      state.registered = true; 
       state.cooldown = true;
       state.cooldownSecs = retry > 0 ? retry : null;
       state.canReceiveOTP = false;
       return state;
     }
+
     if (s === 'blocked' || s === 'banned' || reason === 'blocked') {
       state.registered = true;
       state.banned = true;
@@ -179,63 +209,36 @@ export async function probeNumber(phone) {
       state.canReceiveOTP = false;
       return state;
     }
-    if (reason === 'too_many_requests' || s === 'rate_limit') {
+
+    // Limit lain (spam, new acct)
+    if (reason === 'too_many_requests' || s === 'rate_limit' || reason === 'new_acct' || reason === 'new_account' || reason === 'spam') {
       state.registered = true;
       state.limitActive = true;
-      state.limitType = 'rate';
+      state.limitType = reason || 'rate';
       state.canReceiveOTP = false;
-      return state;
-    }
-    if (reason === 'new_acct' || reason === 'new_account') {
-      state.registered = true;
-      state.limitActive = true;
-      state.limitType = 'new_account';
-      state.canReceiveOTP = false;
-      return state;
-    }
-    if (reason === 'spam') {
-      state.registered = true;
-      state.limitActive = true;
-      state.limitType = 'spam';
-      state.canReceiveOTP = false;
-      return state;
-    }
-    if (reason === 'no_routes' || s === 'no_routes') {
-      state.registered = true;
-      state.noCloneSupport = true;
-      state.canReceiveOTP = false;
-      return state;
-    }
-    if (reason === 'mismatch' || reason === 'no_multidevice') {
-      state.registered = true;
-      state.noCloneSupport = true;
-      state.canReceiveOTP = false;
-      return state;
-    }
-    if (reason === 'temporarily_unavailable') {
-      state.registered = true;
-      state.limitActive = true;
-      state.limitType = 'temporarily_unavailable';
-      state.cooldown = true;
-      state.cooldownSecs = retry > 0 ? retry : null;
-      state.canReceiveOTP = false;
-      return state;
-    }
-    if (reason === 'bad_param') {
-      state.tokenRejected = true;
-      state.canReceiveOTP = false;
-      state.errorDetail = `Parameter invalid: ${body.param || 'unknown'}`;
-      return state;
-    }
-    if (reason === 'bad_token' || res.status === 401 || res.status === 403) {
-      state.tokenRejected = true;
-      state.canReceiveOTP = false;
-      state.errorDetail = 'Token ditolak oleh WA';
       return state;
     }
 
-    if (res.status === 200) {
+    if (reason === 'no_routes' || reason === 'mismatch' || reason === 'no_multidevice') {
       state.registered = true;
+      state.noCloneSupport = true;
+      state.canReceiveOTP = false;
+      return state;
+    }
+
+    // Error param dari server, JANGAN set registered = false!
+    // Biarkan state.registered dari STAGE 1 tetap utuh.
+    if (reason === 'bad_param') {
+      state.tokenRejected = true;
+      state.canReceiveOTP = false;
+      state.errorDetail = `Param invalid: ${body.param || 'unknown'}`;
+      return state;
+    }
+
+    if (reason === 'bad_token' || codeRes.status === 401 || codeRes.status === 403) {
+      state.tokenRejected = true;
+      state.canReceiveOTP = false;
+      state.errorDetail = 'Token ditolak WA';
       return state;
     }
 
