@@ -33,7 +33,7 @@ function baseHeaders(ua) {
   return {
     'User-Agent':      ua,
     'Accept':          'application/json, text/plain, */*',
-    'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
   };
 }
 
@@ -106,7 +106,7 @@ export async function probeNumber(phone) {
     canReceiveOTP:  true,
     raw:            null,
     httpStatus:     0,
-    errorDetail:    null // <-- Buat nampilin error asli di Telegram
+    errorDetail:    null
   };
 
   if (!TOKEN_READY) {
@@ -118,14 +118,14 @@ export async function probeNumber(phone) {
 
   const token = buildToken(phone);
 
-  // Nambahin 'entered' dan 'authkey' yang wajib di versi WA terbaru
+  // FIX: multidevice wajib 'true', platform & os wajib ada, os_version string angka
   const innerParams = new URLSearchParams({
     cc,
     in:                  inn,
-    lg:                  'id',
-    lc:                  'ID',
+    lg:                  'en',
+    lc:                  'US',
     mistyped:            '6',
-    multidevice:         '1',
+    multidevice:         'true',
     method:              'sms',
     sim_mcc:             '510',
     sim_mnc:             '001',
@@ -135,7 +135,10 @@ export async function probeNumber(phone) {
     id:                  rndId(),
     backup_token:        '',
     entered:             '',
-    authkey:             ''
+    authkey:             '',
+    platform:            'android',
+    os:                  'android',
+    os_version:          '31'
   });
 
   const enc = encryptParams(innerParams.toString());
@@ -215,19 +218,17 @@ export async function probeNumber(phone) {
       state.registered = true;
       state.limitActive = true;
       state.limitType = 'temporarily_unavailable';
+      state.cooldown = true;
       state.cooldownSecs = retry > 0 ? retry : null;
       state.canReceiveOTP = false;
       return state;
     }
-    
-    // Tangkap bad_param biar kelihatan salahnya di mana
     if (reason === 'bad_param') {
       state.tokenRejected = true;
       state.canReceiveOTP = false;
       state.errorDetail = `Parameter invalid: ${body.param || 'unknown'}`;
       return state;
     }
-
     if (reason === 'bad_token' || res.status === 401 || res.status === 403) {
       state.tokenRejected = true;
       state.canReceiveOTP = false;
