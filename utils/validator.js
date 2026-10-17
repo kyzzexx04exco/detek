@@ -1,4 +1,4 @@
-// validator.js — E.164 filter + WA mobile prefix check
+// utils/validator.js
 
 const VALID_CC = new Set([
   '1','7','20','27','30','31','32','33','34','36','39','40','41',
@@ -20,7 +20,6 @@ const VALID_CC = new Set([
   '977','992','993','994','995','996','998'
 ]);
 
-// prefix mobile per negara — biar shortcode/landline ketolak
 const WA_PREFIX = {
   '62':  /^8[1-9]\d{6,10}$/,
   '1':   /^[2-9]\d{9}$/,
@@ -39,11 +38,6 @@ const WA_PREFIX = {
   '234': /^[789]\d{9}$/,
   '254': /^7\d{8}$/,
   '255': /^[67]\d{8}$/,
-  '256': /^[37]\d{8}$/,
-  '233': /^[235]\d{8}$/,
-  '237': /^[67]\d{8}$/,
-  '213': /^[567]\d{8}$/,
-  '212': /^[67]\d{8}$/,
 };
 
 function extractCC(digits) {
@@ -54,43 +48,41 @@ function extractCC(digits) {
   return null;
 }
 
-/**
- * Parse teks bebas jadi array nomor valid E.164
- * @param {string} text
- * @returns {{ valid: string[], invalid: string[] }}
- */
 export function parseNumbers(text) {
   const valid   = [];
   const invalid = [];
-
-  const tokens = text.match(/\+\d[\d\s\-]{3,17}\d|\d{7,15}/g) || [];
+  const tokens  = text.match(/\+\d[\d\s\-]{3,17}\d|\d{7,15}/g) || [];
 
   for (const raw of tokens) {
     const cleaned    = raw.replace(/[\s\-]/g, '');
     const normalized = cleaned.startsWith('+') ? cleaned : '+' + cleaned;
     const digits     = normalized.slice(1);
 
-    if (digits.length < 7 || digits.length > 15) {
-      invalid.push(normalized);
-      continue;
-    }
+    if (digits.length < 7 || digits.length > 15) { invalid.push(normalized); continue; }
 
     const cc = extractCC(digits);
-    if (!cc) {
-      invalid.push(normalized);
-      continue;
-    }
+    if (!cc) { invalid.push(normalized); continue; }
 
-    const local      = digits.slice(cc.length);
-    const prefixRule = WA_PREFIX[cc];
-
-    if (prefixRule && !prefixRule.test(local)) {
-      invalid.push(normalized);
-      continue;
-    }
+    const local = digits.slice(cc.length);
+    const rule  = WA_PREFIX[cc];
+    if (rule && !rule.test(local)) { invalid.push(normalized); continue; }
 
     valid.push(normalized);
   }
 
   return { valid: [...new Set(valid)], invalid };
+}
+
+export function fmtDuration(secs) {
+  if (!secs || secs <= 0) return null;
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  const parts = [];
+  if (d) parts.push(`${d}d`);
+  if (h) parts.push(`${h}j`);
+  if (m) parts.push(`${m}m`);
+  if (s && !d && !h) parts.push(`${s}s`);
+  return parts.join(' ') || '< 1m';
 }
