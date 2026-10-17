@@ -15,17 +15,16 @@ const TOKEN_PRECALC_KEY = Buffer.from(
   'base64'
 );
 
-// Baca langsung dari .env yang udah digenerate setup-apk.js
 const WA_CERT_DER    = process.env.WA_CERT_DER ? Buffer.from(process.env.WA_CERT_DER, 'base64') : null;
 const WA_CLASSES_MD5 = process.env.WA_CLASSES_MD5 ? Buffer.from(process.env.WA_CLASSES_MD5, 'base64') : null;
 const TOKEN_READY    = !!(WA_CERT_DER && WA_CLASSES_MD5);
 
 const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
 
-// Samakan versi UA dengan APK terbaru yang di-download setup-apk.js
 const UA_POOL = [
   'WhatsApp/2.24.13.76 A',
-  'WhatsApp/2.24.11.75 A'
+  'WhatsApp/2.24.11.75 A',
+  'WhatsApp/2.24.9.73 A'
 ];
 const rndUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 const rndId = () => crypto.randomBytes(8).toString('hex');
@@ -118,7 +117,7 @@ export async function probeNumber(phone) {
 
   const token = buildToken(phone);
 
-  // Hapus os & os_version, WA cuma butuh 'platform'
+  // Parameternya dikembalikan ke standar tanpa 'platform', 'os', atau 'os_version'
   const innerParams = new URLSearchParams({
     cc,
     in:                  inn,
@@ -134,7 +133,6 @@ export async function probeNumber(phone) {
     token:               token,
     id:                  rndId(),
     backup_token:        '',
-    platform:            'android'
   });
 
   const enc = encryptParams(innerParams.toString());
