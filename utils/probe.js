@@ -1,79 +1,10 @@
-// utils/probe.js — WA OTP cooldown probe via /v2/code
-import axios  from 'axios';
-import crypto from 'crypto';
-import 'dotenv/config';
+// utils/probe.js — WA Probe via Baileys (Pairing Code - PRODUCTION STABLE)
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import pino from 'pino';
 
-const DEBUG = process.env.DEBUG === '1';
-
-const WA_SERVER_PUBKEY = Buffer.from(
-  '8e8c0f74c3ebc5d7a6865c6c3c843856b06121cce8ea774d22fb6f122512302d',
-  'hex'
-);
-
-const TOKEN_PRECALC_KEY = Buffer.from(
-  'eQV5aq/Cg63Gsq1sshN9T3gh+UUp0wIw0xgHYT1bnCjEqOJQKCRrWxdAe2yvsDeCJL+Y4G3PRD2HUF7oUgiGo8vGlNJOaux26k+A2F3hj8A=',
-  'base64'
-);
-
-const WA_CERT_DER    = process.env.WA_CERT_DER ? Buffer.from(process.env.WA_CERT_DER, 'base64') : null;
-const WA_CLASSES_MD5 = process.env.WA_CLASSES_MD5 ? Buffer.from(process.env.WA_CLASSES_MD5, 'base64') : null;
-
-// Baca User-Agent yang otomatis disinkronkan oleh setup-apk.js
-const FIXED_UA = process.env.WA_UA || 'WhatsApp/2.24.13.76 A';
-
-const TOKEN_READY = !!(WA_CERT_DER && WA_CLASSES_MD5);
-
-const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
-
-function baseHeaders() {
-  return {
-    'User-Agent':      FIXED_UA,
-    'Accept':          'application/json, text/plain, */*',
-    'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8',
-  };
-}
-
-function splitPhone(phone) {
-  const d = phone.replace('+', '');
-  if (d.startsWith('62') && d.length >= 11) return { cc: '62', inn: d.slice(2) };
-  if (d.startsWith('60') && d.length >= 10) return { cc: '60', inn: d.slice(2) };
-  if (d.startsWith('1')  && d.length >= 11) return { cc: '1',  inn: d.slice(1) };
-  if (d.length >= 10) return { cc: d.slice(0, 2), inn: d.slice(2) };
-  return { cc: d.slice(0, 1), inn: d.slice(1) };
-}
-
-function importX25519PubKey(rawBytes) {
-  return crypto.createPublicKey({
-    key:    Buffer.concat([X25519_SPKI_PREFIX, rawBytes]),
-    format: 'der',
-    type:   'spki',
-  });
-}
-
-function encryptParams(queryString) {
-  const { publicKey: clientPub, privateKey: clientPriv } =
-    crypto.generateKeyPairSync('x25519');
-  const serverKey    = importX25519PubKey(WA_SERVER_PUBKEY);
-  const sharedSecret = crypto.diffieHellman({ privateKey: clientPriv, publicKey: serverKey });
-  const iv      = Buffer.alloc(12, 0);
-  const cipher  = crypto.createCipheriv('aes-256-gcm', sharedSecret, iv);
-  const ct      = Buffer.concat([cipher.update(Buffer.from(queryString, 'utf8')), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  const clientPubRaw = clientPub.export({ format: 'der', type: 'spki' }).subarray(12);
-  
-  return Buffer.concat([clientPubRaw, ct, authTag])
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-}
-
-// Fungsi asli murni WA
-function buildToken(phone) {
-  const digits = Buffer.from(phone.replace('+', ''), 'utf8');
-  const data = Buffer.concat([WA_CERT_DER, WA_CLASSES_MD5, digits]);
-  return crypto.createHmac('sha1', TOKEN_PRECALC_KEY).update(data).digest('base64');
-}
+const logger = pino({ level: 'silent' });
+let sock = null;
+let isInitializing = false;
 
 export function fmtCooldown(secs) {
   if (!secs || secs <= 0) return null;
@@ -89,8 +20,68 @@ export function fmtCooldown(secs) {
   return parts.join(' ') || '< 1m';
 }
 
+export async function initWA() {
+  if (sock) return sock;
+  if (isInitializing) {
+    while (isInitializing) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (sock) return sock;
+  }
+
+  isInitializing = true;
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_session');
+    
+    // FIX: Handle ESM/CJS export differences
+    const socketFactory = makeWASocket.default || makeWASocket;
+    
+    sock = socketFactory({
+      auth: state,
+      logger,
+      browser: ['Chrome', 'Windows', '10.0'],
+      printQRInTerminal: false
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', (update) => {
+      const { connection, lastDisconnect } = update;
+      if (connection === 'close') {
+        const code = lastDisconnect?.error?.output?.statusCode;
+        if (code !== DisconnectReason.loggedOut) {
+          sock = null; 
+        }
+      }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  } catch (err) {
+    sock = null;
+    throw err;
+  } finally {
+    isInitializing = false;
+  }
+
+  return sock;
+}
+
 export async function probeNumber(phone) {
-  const { cc, inn } = splitPhone(phone);
+  let client;
+  try {
+    client = await initWA();
+  } catch (e) {
+    return {
+      phone,
+      registered:     false,
+      banned:         false,
+      cooldown:       false,
+      canReceiveOTP:  false,
+      errorDetail:    `Socket Init Failed: ${e.message}`
+    };
+  }
+
+  const cleanPhone = phone.replace('+', '').replace(/[^0-9]/g, '');
 
   const state = {
     phone,
@@ -104,150 +95,44 @@ export async function probeNumber(phone) {
     noCloneSupport: false,
     limitActive:    false,
     limitType:      null,
-    tokenRejected:  false,
     canReceiveOTP:  true,
     raw:            null,
-    httpStatus:     0,
+    httpStatus:     200,
     errorDetail:    null
   };
 
-  if (!TOKEN_READY) {
-    state.canReceiveOTP = false;
-    state.tokenRejected = true;
-    state.errorDetail = 'Token belum disetup (jalankan node setup-apk.js)';
-    return state;
-  }
-
-  const rndId = () => crypto.randomBytes(8).toString('hex');
-
-  // ─── STAGE 1: CEK EXIST ────────────────────────────────────────────────────
-  const existParams = new URLSearchParams({
-    cc, in: inn, lg: 'id', lc: 'ID', id: rndId(),
-    platform: 'Android' // FIX: Sinkronkan platform di Stage 1
-  });
-  const existEnc = encryptParams(existParams.toString());
-
   try {
-    const existRes = await axios.get('https://v.whatsapp.net/v2/exist', {
-      params: { ENC: existEnc },
-      headers: baseHeaders(),
-      timeout: 10_000,
-      validateStatus: () => true,
-    });
-
-    const existBody = existRes.data || {};
-    if (existBody.status === 'ok' && existBody.login) {
-      state.registered = true;
-    } else if (existBody.status === 'fail' && !existBody.login) {
-      if (existBody.reason !== 'bad_token' && existBody.reason !== 'bad_param') {
-        state.registered = false;
-        state.canReceiveOTP = false;
-        return state;
-      }
-    }
-  } catch (e) {
-    if (DEBUG) console.log(`[EXIST ERR] ${phone} | ${e.message}`);
-  }
-
-  // ─── STAGE 2: CEK CODE (REQUEST OTP) ───────────────────────────────────────
-  const token = buildToken(phone);
-  
-  const codeParams = new URLSearchParams({
-    cc,
-    in:                  inn,
-    lg:                  'id',
-    lc:                  'ID',
-    mistyped:            '6',
-    multidevice:         'true',
-    method:              'sms',
-    sim_mcc:             '510',
-    sim_mnc:             '001',
-    network_radio_type:  '1',
-    reason:              '',
-    token:               token,
-    id:                  rndId(),
-    backup_token:        '',
-    entered:             '',
-    authkey:             '',
-    platform:            'Android'
-  });
-
-  const codeEnc = encryptParams(codeParams.toString());
-
-  try {
-    const codeRes = await axios.get('https://v.whatsapp.net/v2/code', {
-      params:         { ENC: codeEnc },
-      headers:        baseHeaders(),
-      timeout:        12_000,
-      validateStatus: () => true,
-    });
-
-    state.httpStatus = codeRes.status;
-    state.raw        = codeRes.data;
-
-    if (DEBUG) console.log(`[CODE] ${phone} | HTTP ${codeRes.status} | ${JSON.stringify(codeRes.data)}`);
-
-    const body = codeRes.data || {};
-    const s = String(body.status || '').toLowerCase();
-    const reason = String(body.reason || '').toLowerCase();
+    const code = await client.requestPairingCode(cleanPhone);
     
-    let retryStr = body.retry_after;
-    if (!retryStr && body.resend_after_seconds) retryStr = body.resend_after_seconds;
-    if (!retryStr && body.sec_wait) retryStr = body.sec_wait;
-    if (!retryStr && body.retry) retryStr = body.retry;
-    const retry = parseInt(retryStr || '0', 10) || 0;
-
-    if (s === 'sent' || s === 'ok') {
-      state.registered = true;
-      state.canReceiveOTP = true;
-      state.cloneSupport = body.voice_length !== undefined || body.flash_type !== undefined;
-      return state;
-    }
+    state.registered = true;
+    state.canReceiveOTP = true;
+    state.cloneSupport = true; 
+    state.raw = { pairing_code: code };
     
-    if (s === 'too_recent' || s === 'too-recent' || reason === 'too_recent') {
-      state.registered = true; 
-      state.cooldown = true;
-      state.cooldownSecs = retry > 0 ? retry : null;
-      state.canReceiveOTP = false;
-      return state;
-    }
-
-    if (reason === 'temporarily_unavailable') {
-      state.registered = true;
-      state.ipLimited = true;
-      state.cooldownSecs = retry > 0 ? retry : 300;
-      state.canReceiveOTP = false;
-      return state;
-    }
-
-    if (s === 'blocked' || s === 'banned' || reason === 'blocked') {
-      state.registered = true;
-      state.banned = true;
-      state.bannedType = retry > 0 ? 'temporary' : 'permanent';
-      state.canReceiveOTP = false;
-      return state;
-    }
-
-    if (reason === 'no_routes' || reason === 'mismatch' || reason === 'no_multidevice') {
-      state.registered = true;
-      state.noCloneSupport = true;
-      state.canReceiveOTP = false;
-      return state;
-    }
-
-    if (reason === 'bad_param' || reason === 'bad_token' || codeRes.status === 401 || codeRes.status === 403) {
-      state.tokenRejected = true;
-      state.canReceiveOTP = false;
-      state.errorDetail = `Param/Token Invalid: ${body.param || 'unknown'}`;
-      return state;
-    }
-
     return state;
   } catch (err) {
-    if (DEBUG) console.log(`[CODE ERR] ${phone} | ${err.message}`);
-    state.httpStatus = 0;
-    state.canReceiveOTP = false;
-    state.errorDetail = err.message;
+    const msg = String(err.message || err.text || err || '').toLowerCase();
+    state.raw = { error: msg };
+
+    if (msg.includes('rate-overlimit') || msg.includes('too_fast') || msg.includes('too_many_requests') || msg.includes('429')) {
+      state.registered = true;
+      state.cooldown = true;
+      state.canReceiveOTP = false;
+      state.cooldownSecs = 14400;
+      state.limitType = 'rate';
+    } else if (msg.includes('forbidden') || msg.includes('bad-request') || msg.includes('403')) {
+      state.registered = true; 
+      state.banned = true;
+      state.bannedType = 'permanent';
+      state.canReceiveOTP = false;
+    } else if (msg.includes('item-not-found') || msg.includes('not-authorized') || msg.includes('404')) {
+      state.registered = false;
+      state.canReceiveOTP = false;
+    } else {
+      state.canReceiveOTP = false;
+      state.errorDetail = msg;
+    }
+
     return state;
   }
 }
