@@ -1,6 +1,4 @@
-// setup-apk.js — Auto-fetch APK, extract cert + classes MD5, write .env
-// Jalankan: node setup-apk.js
-
+// setup-apk.js — Auto-fetch APK, extract multi-dex MD5, cert, & auto-sync User-Agent
 import axios  from 'axios';
 import AdmZip from 'adm-zip';
 import crypto from 'crypto';
@@ -19,8 +17,8 @@ async function main() {
       url: 'https://d.apkpure.com/b/APK/com.whatsapp?version=latest',
       responseType: 'arraybuffer',
       maxRedirects: 10,
-      timeout: 120_000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36' }
+      timeout: 180_000,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
     });
     buffer = Buffer.from(res.data);
   } catch (e) {
@@ -36,17 +34,39 @@ async function main() {
   console.log(`[+] Downloaded ${(buffer.length / 1024 / 1024).toFixed(1)} MB`);
   const zip = new AdmZip(buffer);
 
-  // 1. Extract classesMD5
-  const dexEntry = zip.getEntry('classes.dex');
-  if (!dexEntry) {
-    console.error('[-] classes.dex tidak ditemukan.');
+  // ─── 1. Ekstrak Versi dari AndroidManifest.xml ─────────────────────────────
+  let appVersion = '2.24.13.76'; // Fallback
+  try {
+    const manifest = zip.getEntry('AndroidManifest.xml');
+    if (manifest) {
+      const str = manifest.getData().toString('utf8');
+      const match = str.match(/(\d{1,2}\.\d{1,2}\.\d{1,2}\.\d{1,2})/);
+      if (match && match[1]) appVersion = match[1];
+    }
+  } catch (e) {}
+  console.log(`[+] APK Version Detected: ${appVersion}`);
+
+  // ─── 2. Ekstrak Multi-Dex MD5 ──────────────────────────────────────────────
+  console.log('[+] Processing Multi-Dex (classes*.dex)...');
+  const dexEntries = zip.getEntries()
+    .filter(e => /^classes\d*\.dex$/i.test(e.entryName))
+    .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
+
+  if (dexEntries.length === 0) {
+    console.error('[-] File classes.dex tidak ditemukan.');
     process.exit(1);
   }
-  const md5Raw = crypto.createHash('md5').update(dexEntry.getData()).digest();
-  const classesMD5B64 = md5Raw.toString('base64');
-  console.log(`[+] classes.dex MD5: ${classesMD5B64}`);
 
-  // 2. Extract cert DER
+  const hashList = [];
+  for (const entry of dexEntries) {
+    const fileHash = crypto.createHash('md5').update(entry.getData()).digest();
+    hashList.push(fileHash);
+  }
+  // Gabungkan seluruh hash dex sesuai urutan (Fix Multi-Dex)
+  const finalDexMD5 = crypto.createHash('md5').update(Buffer.concat(hashList)).digest('base64');
+  console.log(`[+] Combined Multi-Dex MD5 (Base64): ${finalDexMD5}`);
+
+  // ─── 3. Ekstrak Cert DER ───────────────────────────────────────────────────
   const rsaEntry = zip.getEntries().find(e =>
     /^META-INF\/.+\.(RSA|DSA|EC)$/i.test(e.entryName)
   );
@@ -63,27 +83,28 @@ async function main() {
   const certDERB64 = certDER.toString('base64');
   console.log(`[+] Cert DER extracted (${certDER.length} bytes)`);
 
-  // 3. Tulis ke .env
+  // ─── 4. Tulis ke .env (Sertakan WA_UA) ─────────────────────────────────────
   const projectEnv = path.join(process.cwd(), '.env');
   const envContent = fs.existsSync(projectEnv) ? fs.readFileSync(projectEnv, 'utf8') : '';
   const filtered = envContent.split('\n')
-    .filter(l => !l.startsWith('WA_CERT_DER=') && !l.startsWith('WA_CLASSES_MD5='))
+    .filter(l => !l.startsWith('WA_CERT_DER=') && !l.startsWith('WA_CLASSES_MD5=') && !l.startsWith('WA_UA='))
     .join('\n')
     .trimEnd();
 
   fs.writeFileSync(projectEnv, (filtered ? filtered + '\n' : '') +
     `WA_CERT_DER=${certDERB64}\n` +
-    `WA_CLASSES_MD5=${classesMD5B64}\n`
+    `WA_CLASSES_MD5=${finalDexMD5}\n` +
+    `WA_UA=WhatsApp/${appVersion} A\n`
   );
-  console.log(`[✓] Hash berhasil disimpan ke .env`);
+  console.log(`\n[✓] Berhasil update .env (Hash + Versi UA: WhatsApp/${appVersion} A)`);
 }
 
 function extractCertFromPKCS7(buf) {
   try {
-    const der        = new DERParser(buf);
-    const outer      = der.readSequence();
+    const der = new DERParser(buf);
+    const outer = der.readSequence();
     outer.readOID();
-    const tagged     = outer.readTagged(0);
+    const tagged = outer.readTagged(0);
     const signedData = tagged.readSequence();
     signedData.readInteger();
     signedData.readSet();
@@ -164,7 +185,6 @@ class DERParser {
     if (tag !== expected) throw new Error(`Expected [${n}], got 0x${tag.toString(16)}`);
     return this.child(value);
   }
-  hasMore() { return this.offset < this.end; }
 }
 
 main().catch(e => { console.error(e); process.exit(1); });
