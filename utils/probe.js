@@ -106,18 +106,19 @@ export async function probeNumber(phone) {
     canReceiveOTP:  true,
     raw:            null,
     httpStatus:     0,
+    errorDetail:    null // <-- Buat nampilin error asli di Telegram
   };
 
   if (!TOKEN_READY) {
-    if (DEBUG) console.log(`[ERR] Token belum disetup. Jalankan: node setup-apk.js`);
     state.canReceiveOTP = false;
     state.tokenRejected = true;
+    state.errorDetail = 'Token belum disetup (jalankan node setup-apk.js)';
     return state;
   }
 
   const token = buildToken(phone);
 
-  // Parameternya dikembalikan ke standar tanpa 'platform', 'os', atau 'os_version'
+  // Nambahin 'entered' dan 'authkey' yang wajib di versi WA terbaru
   const innerParams = new URLSearchParams({
     cc,
     in:                  inn,
@@ -133,6 +134,8 @@ export async function probeNumber(phone) {
     token:               token,
     id:                  rndId(),
     backup_token:        '',
+    entered:             '',
+    authkey:             ''
   });
 
   const enc = encryptParams(innerParams.toString());
@@ -217,10 +220,18 @@ export async function probeNumber(phone) {
       return state;
     }
     
-    if (reason === 'bad_token' || reason === 'bad_param' || res.status === 401 || res.status === 403) {
-      state.registered = false;
+    // Tangkap bad_param biar kelihatan salahnya di mana
+    if (reason === 'bad_param') {
       state.tokenRejected = true;
       state.canReceiveOTP = false;
+      state.errorDetail = `Parameter invalid: ${body.param || 'unknown'}`;
+      return state;
+    }
+
+    if (reason === 'bad_token' || res.status === 401 || res.status === 403) {
+      state.tokenRejected = true;
+      state.canReceiveOTP = false;
+      state.errorDetail = 'Token ditolak oleh WA';
       return state;
     }
 
@@ -234,6 +245,7 @@ export async function probeNumber(phone) {
     if (DEBUG) console.log(`[CODE ERR] ${phone} | ${err.message}`);
     state.httpStatus = 0;
     state.canReceiveOTP = false;
+    state.errorDetail = err.message;
     return state;
   }
 }
